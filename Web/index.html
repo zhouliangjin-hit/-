@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>马原研习社 · 马克思主义基本原理学习平台</title>
 <link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="assets/mindmap.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23b3402f'/%3E%3Cpath d='M16 6l2.6 6.2 6.7.5-5.1 4.4 1.6 6.5L16 20l-5.8 3.6 1.6-6.5-5.1-4.4 6.7-.5z' fill='%23f3d9a4'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -29,6 +30,9 @@
   </div>
 </header>
 
+<p id="storageNotice" class="card" role="status" aria-live="polite" aria-atomic="true" hidden
+  style="max-width:1140px;margin:16px auto;padding:12px 18px;color:var(--red)"></p>
+
 <main id="view" class="view">
   <div class="loading-screen">
     <div class="loading-star"></div>
@@ -38,9 +42,10 @@
 
 <footer class="footer">
   <p>马原研习社 · 公益复习资料，禁止售卖 ｜ 数据来源：2024秋期末回忆卷 / 课堂小测 / 考研真题精选</p>
-  <p>设计文档见项目内 <code>DOCUMENTATION.md</code>，可用于后续迭代开发。</p>
+  <p>双击即可离线学习 ｜ 学习记录保存在当前浏览器，请到「成绩分析」定期导出备份。</p>
 </footer>
 
+<script src="data/offline-data.js"></script>
 <script src="assets/app.js"></script>
 <script src="assets/quiz.js"></script>
 <script src="assets/mindmap.js"></script>

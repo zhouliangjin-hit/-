@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-parse_sources.py — 将 uploads/ 下的 Markdown 素材统一转换为 web 应用使用的 JSON 数据。
+parse_sources.py — 将工程 mindmap/ 与 questions/ 的 Markdown 转为网页 JSON 数据。
 
 对应原始 mindmap/README 的约定：「先把 markdown 素材上传，最后统一变成 json」。
 
-产物（写入 mayuan-study/data/）：
+产物（写入工程 Web/data/）：
   questions.json   全部客观题（判断/单选/多选，含答案与解析）
   subjective.json  全部主观题（简答/辨析/论述/材料论述，含参考答案与评分要点）
-  chapters.json    思维导图知识树（由 chapter-01.md 标题层级解析而来）
+  chapters.json    完整知识树（标题、嵌套列表、正文与过程关系，保留原文）
   banks.json       题库索引（分组、题量、说明等元信息）
 
 题目 JSON Schema 见 DOCUMENTATION.md「数据结构」一节。
 """
 import json, re, os, sys
+from pathlib import Path
 
-SRC = "/home/user/uploads"
-OUT = "/home/user/mayuan-study/data"
-os.makedirs(OUT, exist_ok=True)
+from mindmap_source import parse_mindmap
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+OUT = PROJECT_ROOT / "Web" / "data"
+SOURCE_FILES = {
+    "chapter-01.md": PROJECT_ROOT / "mindmap" / "chapter-01.md",
+    "Question 第一章 第一节.md": PROJECT_ROOT / "questions" / "课堂小测" / "Question 第一章 第一节.md",
+    "Question 第一章 第二节&第三节.md": PROJECT_ROOT / "questions" / "课堂小测" / "Question 第一章 第二节&第三节.md",
+    "24秋-Question.md": PROJECT_ROOT / "questions" / "历年期末试题" / "24秋-Question.md",
+    "24秋-Answer.md": PROJECT_ROOT / "questions" / "历年期末试题" / "24秋-Answer.md",
+    "马原考研题（选择）.md": PROJECT_ROOT / "questions" / "考研真题" / "马原考研题（选择）.md",
+}
 
 def read(name):
-    with open(os.path.join(SRC, name), encoding="utf-8") as f:
-        return f.read()
+    return SOURCE_FILES[name].read_text(encoding="utf-8")
 
 def clean(s):
     """去掉 markdown 强调符号并压缩空白。"""
@@ -295,42 +304,11 @@ def parse_kaoyan():
 
 # ---------------------------------------------------------------- 思维导图知识树
 def parse_chapters():
-    lines = read("chapter-01.md").splitlines()
-    root = {"id": "root", "title": "马克思主义哲学 · 知识体系", "level": 0,
-            "notes": ["依据 2024 秋课程笔记整理，覆盖导论、唯物论、辩证法三大板块。"], "children": []}
-    stack = [root]
-    counters = {}
-    head_re = re.compile(r"^(#{1,4})\s+(.+)$")
-    for ln in lines:
-        m = head_re.match(ln)
-        if m:
-            level = len(m.group(1))
-            title = m.group(2).strip()
-            if title == "马克思主义哲学笔记":
-                continue
-            while stack and stack[-1]["level"] >= level:
-                stack.pop()
-            parent = stack[-1]
-            key = parent["id"]
-            counters[key] = counters.get(key, 0) + 1
-            node = {"id": f"{parent['id']}.{counters[key]}", "title": title,
-                    "level": level, "notes": [], "children": []}
-            parent["children"].append(node)
-            stack.append(node)
-        else:
-            s = ln.strip()
-            if s:
-                stack[-1]["notes"].append(re.sub(r"^[-*]\s*", "", s))
-    # 裁剪过长笔记（侧栏只承担「导读」，保留前 40 条）
-    def trim(n):
-        n["notes"] = n["notes"][:40]
-        for c in n["children"]:
-            trim(c)
-    trim(root)
-    return root
+    return parse_mindmap(SOURCE_FILES["chapter-01.md"])
 
 # ---------------------------------------------------------------- 汇总输出
 def main():
+    OUT.mkdir(parents=True, exist_ok=True)
     q1 = parse_c1s1()
     q2, s2 = parse_c1s23()
     q3, s3 = parse_final()

@@ -9,6 +9,7 @@
 /* ---------------- 工具 ---------------- */
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const PORTRAIT_SRC = $(".ink-watermark")?.getAttribute("src") || "assets/marx-engels.png";
 const TYPE_NAME = { judge: "判断题", single: "单选题", multi: "多选题" };
 
 function escapeHtml(s) {
@@ -67,27 +68,177 @@ function shuffle(arr) {
 /* ---------------- 本地存档 Store ----------------
    localStorage 键：mayuan.study.v1
    结构约定见 DOCUMENTATION.md「localStorage 存档结构」 */
+function isStudyObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+}
+
+/** 只检查数据，不解释或执行内容；连未知字段内的危险键也拒绝。 */
+function assertSafeStudyObject(value) {
+  const pending = [value];
+  let visited = 0;
+  while (pending.length) {
+    const item = pending.pop();
+    if (++visited > 200000) throw new Error("备份内容过多，请选择本应用导出的学习备份。");
+    if (item === null || typeof item !== "object") continue;
+    if (!Array.isArray(item) && !isStudyObject(item)) throw new Error("备份包含不支持的数据类型。");
+    for (const key of Object.keys(item)) {
+      if (["__proto__", "prototype", "constructor"].includes(key)) {
+        throw new Error("备份含有不安全的字段，已拒绝导入。");
+      }
+      pending.push(item[key]);
+    }
+  }
+}
+
+/** 存档校验与复制；knownIds 只在题库已加载后用于过滤旧题号。 */
+function normalizeStudyData(raw, { requireComplete = false, knownIds = null } = {}) {
+  assertSafeStudyObject(raw);
+  if (!isStudyObject(raw)) throw new Error("学习存档应是一个 JSON 对象。");
+  const fields = ["answers", "wrongBook", "attempts", "sessions", "levels", "days"];
+  if (requireComplete && fields.some(key => !Object.hasOwn(raw, key))) {
+    throw new Error("备份缺少学习记录字段，请选择本应用导出的 JSON 文件。");
+  }
+  const data = Store.defaults();
+  const ignoredIds = new Set();
+  const fail = field => { throw new Error(`学习存档中的 ${field} 格式不正确。`); };
+  const object = (value, field) => { if (!isStudyObject(value)) fail(field); return value; };
+  const number = (value, field, max = 1000000000, integer = true) => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > max
+      || (integer && !Number.isSafeInteger(value))) fail(field);
+    return value;
+  };
+  const bool = (value, field) => { if (typeof value !== "boolean") fail(field); return value; };
+  const text = (value, field, max = 500) => {
+    if (typeof value !== "string" || value.length > max) fail(field);
+    return value;
+  };
+  const timestamp = (value, field) => number(value, field, 8640000000000000);
+  const questionId = (value, field) => {
+    if (typeof value !== "string" || !/^[A-Za-z0-9:_-]{1,120}$/.test(value)) fail(field);
+    if (knownIds && !knownIds.has(value)) { ignoredIds.add(value); return false; }
+    return true;
+  };
+  const mode = (value, field) => {
+    if (!["practice", "exam", "wrong", "subjective"].includes(value)) fail(field);
+    return value;
+  };
+
+  for (const [qid, value] of Object.entries(object(raw.answers === undefined ? {} : raw.answers, "answers"))) {
+    const a = object(value, "answers");
+    const entry = {
+      tries: number(a.tries, "answers.tries"), ok: number(a.ok, "answers.ok"),
+      wrong: number(a.wrong, "answers.wrong"), lastOk: bool(a.lastOk, "answers.lastOk"),
+      lastTs: timestamp(a.lastTs, "answers.lastTs")
+    };
+    if (entry.tries !== entry.ok + entry.wrong) fail("answers 的作答次数");
+    if (questionId(qid, "answers 的题号")) data.answers[qid] = entry;
+  }
+  for (const [qid, value] of Object.entries(object(raw.wrongBook === undefined ? {} : raw.wrongBook, "wrongBook"))) {
+    const w = object(value, "wrongBook");
+    const entry = {
+      ts: timestamp(w.ts, "wrongBook.ts"), count: number(w.count, "wrongBook.count"),
+      mastered: bool(w.mastered, "wrongBook.mastered")
+    };
+    if (questionId(qid, "wrongBook 的题号")) data.wrongBook[qid] = entry;
+  }
+  if (raw.attempts !== undefined && !Array.isArray(raw.attempts)) fail("attempts");
+  for (const value of raw.attempts ?? []) {
+    const a = object(value, "attempts");
+    const entry = {
+      qid: a.qid, ok: bool(a.ok, "attempts.ok"), ts: timestamp(a.ts, "attempts.ts"),
+      mode: mode(a.mode, "attempts.mode")
+    };
+    if (questionId(a.qid, "attempts.qid")) data.attempts.push(entry);
+  }
+  data.attempts = data.attempts.slice(-3000);
+  if (raw.sessions !== undefined && !Array.isArray(raw.sessions)) fail("sessions");
+  for (const value of raw.sessions ?? []) {
+    const s = object(value, "sessions");
+    const entry = {
+      mode: mode(s.mode, "sessions.mode"), title: text(s.title, "sessions.title"),
+      total: number(s.total, "sessions.total"), correct: number(s.correct, "sessions.correct"),
+      pct: number(s.pct, "sessions.pct", 100, false), durSec: number(s.durSec, "sessions.durSec"),
+      ts: timestamp(s.ts, "sessions.ts"), stars: s.stars == null ? null : number(s.stars, "sessions.stars", 3)
+    };
+    if (entry.correct > entry.total) fail("sessions.correct");
+    if (entry.pct !== (entry.total ? Math.round(100 * entry.correct / entry.total) : 0)) fail("sessions.pct");
+    data.sessions.push(entry);
+  }
+  for (const [id, value] of Object.entries(object(raw.levels === undefined ? {} : raw.levels, "levels"))) {
+    if (!/^lv[1-9]\d{0,2}$/.test(id)) fail("levels 的关卡编号");
+    const l = object(value, "levels");
+    data.levels[id] = {
+      stars: number(l.stars, "levels.stars", 3), bestPct: number(l.bestPct, "levels.bestPct", 100, false),
+      plays: number(l.plays, "levels.plays")
+    };
+  }
+  for (const [key, value] of Object.entries(object(raw.days === undefined ? {} : raw.days, "days"))) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key) || !Number.isFinite(Date.parse(key + "T12:00:00Z"))
+      || new Date(key + "T12:00:00Z").toISOString().slice(0, 10) !== key) fail("days 的日期");
+    data.days[key] = number(value, "days 的作答次数");
+  }
+  if (raw.theme !== undefined && !["light", "dark"].includes(raw.theme)) fail("theme");
+  data.theme = raw.theme ?? "light";
+  return { data, ignoredIds: [...ignoredIds] };
+}
+
 const Store = {
   KEY: "mayuan.study.v1",
   data: null,
+  persisted: true,
+  notice: "",
   defaults() {
     return {
-      answers: {},   // qid -> {tries, ok, wrong, lastOk, lastTs}
-      wrongBook: {}, // qid -> {ts, count, mastered}
+      answers: Object.create(null),   // qid -> {tries, ok, wrong, lastOk, lastTs}
+      wrongBook: Object.create(null), // qid -> {ts, count, mastered}
       attempts: [],  // [{qid, ok, ts, mode}] 封顶 3000 条
       sessions: [],  // [{mode,title,total,correct,pct,durSec,ts,stars?}]
-      levels: {},    // 关卡 id -> {stars, bestPct, plays}
-      days: {},      // 'YYYY-MM-DD' -> 当日做题数
+      levels: Object.create(null),    // 关卡 id -> {stars, bestPct, plays}
+      days: Object.create(null),      // 'YYYY-MM-DD' -> 当日做题数
       theme: "light"
     };
   },
+  normalize: normalizeStudyData,
+  showNotice(message = "") {
+    this.notice = message;
+    const notice = $("#storageNotice");
+    if (notice) { notice.textContent = message; notice.hidden = !message; }
+  },
+  unsaved() {
+    this.persisted = false;
+    this.showNotice("学习记录尚未持久保存，关闭页面后可能丢失。可继续学习，请及时到「成绩分析」导出备份。");
+  },
   load() {
+    this.data = this.defaults();
+    let raw;
     try {
-      this.data = Object.assign(this.defaults(), JSON.parse(localStorage.getItem(this.KEY)) || {});
-    } catch { this.data = this.defaults(); }
+      raw = localStorage.getItem(this.KEY);
+    } catch { this.unsaved(); return this.data; }
+    try {
+      if (raw !== null) this.data = this.normalize(JSON.parse(raw)).data;
+      this.persisted = true; this.showNotice();
+    } catch {
+      this.persisted = false;
+      this.showNotice("浏览器中的学习存档无法读取，本次以空记录开始。请到「成绩分析」导入已有备份，并及时导出本次学习记录。");
+    }
     return this.data;
   },
-  save() { localStorage.setItem(this.KEY, JSON.stringify(this.data)); },
+  save() {
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify(this.data));
+      this.persisted = true; this.showNotice(); return true;
+    } catch { this.unsaved(); return false; }
+  },
+  replace(raw) {
+    this.data = this.normalize(raw, { requireComplete: true }).data;
+    return this.save();
+  },
+  reset() {
+    const theme = this.data?.theme || "light";
+    this.data = this.defaults(); this.data.theme = theme;
+    return this.save();
+  },
 
   /** 记录一次作答。ok: boolean; mode: practice/exam/wrong */
   recordAnswer(qid, ok, mode) {
@@ -132,13 +283,30 @@ const Store = {
 /* ---------------- 数据层 DB ---------------- */
 const DB = {
   questions: [], subjective: [], chapters: null, banks: [],
-  byId: {},
+  byId: Object.create(null),
   async load() {
-    const [q, s, c, b] = await Promise.all([
-      "data/questions.json", "data/subjective.json", "data/chapters.json", "data/banks.json"
-    ].map(u => fetch(u).then(r => r.json())));
+    let data = window.MAYUAN_DATA;
+    if (!data) {
+      if (location.protocol === "file:") {
+        throw new Error("未找到内置离线资料。请保留 data/offline-data.js 并重新打开完整的 Web/index.html，或使用 Offline 文件夹中的单文件成品。");
+      }
+      const [questions, subjective, chapters, banks] = await Promise.all([
+        "data/questions.json", "data/subjective.json", "data/chapters.json", "data/banks.json"
+      ].map(async url => {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`无法读取学习资料（HTTP ${response.status}）。`);
+        return response.json();
+      }));
+      data = { questions, subjective, chapters, banks };
+    }
+    const { questions: q, subjective: s, chapters: c, banks: b } = data;
+    if (!Array.isArray(q) || !q.length || !Array.isArray(s) || !isStudyObject(c) || !Array.isArray(b)
+      || q.some(item => !isStudyObject(item) || typeof item.id !== "string")
+      || new Set(q.map(item => item.id)).size !== q.length) {
+      throw new Error("学习资料不完整，请重新打开完整的离线文件。");
+    }
     this.questions = q; this.subjective = s; this.chapters = c; this.banks = b;
-    this.byId = Object.fromEntries(q.map(x => [x.id, x]));
+    this.byId = Object.assign(Object.create(null), Object.fromEntries(q.map(x => [x.id, x])));
   },
   ofBank(bankId) { return this.questions.filter(q => q.bank === bankId); },
   ofKaoyanSection(keywords) {
@@ -167,6 +335,7 @@ function route() {
   const [name, query] = hash.split("?");
   const params = Object.fromEntries(new URLSearchParams(query || ""));
   const view = Views[name || "home"] || Views.home;
+  Views.map?.cleanup?.();
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.route === (name || "")));
   $("#view").innerHTML = "";
   $("#view").scrollTo?.(0, 0); window.scrollTo(0, 0);
@@ -188,10 +357,10 @@ Views.home = function () {
 
   $("#view").innerHTML = `
   <section class="hero">
-    <img class="hero-portrait" src="assets/marx-engels.png" alt="马克思与恩格斯版画素描像">
+    <img class="hero-portrait" src="${escapeHtml(PORTRAIT_SRC)}" alt="马克思与恩格斯版画素描像">
     <div>
       <div class="hero-badges">
-        <span>☰ 思维导图</span><span>✎ 125 道客观题</span><span>⚑ 10 大关卡</span><span>▤ 成绩可析</span>
+        <span>☰ 完整知识树</span><span>✎ ${DB.questions.length} 道客观题</span><span>⚑ 10 大关卡</span><span>▤ 存档可备份</span>
       </div>
       <h1>学马原，如<em>闯关修行</em></h1>
       <p class="slogan">以思维导图为纲，以题库练习为目；纲举目张，错题归仓，成绩有析。</p>
@@ -199,7 +368,7 @@ Views.home = function () {
         <a class="btn primary" href="#/challenge">⚑ 开始闯关</a>
         <a class="btn" href="#/map">思维导图</a>
         <a class="btn" href="#/practice">顺序刷题</a>
-        <a class="btn gold" href="#/about">设计理念</a>
+        <a class="btn gold" href="#/about">使用说明</a>
       </div>
       <p class="hero-quote">哲学家们只是用不同的方式<em>解释世界</em>，而问题在于<em>改变世界</em>。<span>—— 马克思《关于费尔巴哈的提纲》第十一条</span></p>
     </div>
@@ -228,7 +397,7 @@ Views.home = function () {
     <div class="feature-card">
       <div class="fi" style="background:var(--green-soft)">☰</div>
       <h3>知识体系思维导图</h3>
-      <p>沿知识树逐节展开，节点旁可直接跳到对应题目，哪里不熟点哪里。</p>
+      <p>完整保留课程笔记的章节与层级，可搜索知识点、展开分支，并从源笔记跳到关联练习。</p>
       <a class="go" href="#/map">打开导图 →</a>
     </div>
   </div>
@@ -236,7 +405,7 @@ Views.home = function () {
   <h2 class="section-title">功能矩阵 <small>FEATURES</small></h2>
   <div class="feature-grid">
     ${[
-      ["map", "❖", "思维导图", "可缩放、可折叠的动态知识树，节点附导读笔记与刷题跳转。", "var(--red-soft)"],
+      ["map", "❖", "思维导图", "完整知识树支持搜索与折叠，逐节点阅读源笔记，联动关联题目复习。", "var(--red-soft)"],
       ["practice", "✎", "顺序刷题", "五大题库顺序/随机练习，即时判分，逐题附详细解析。", "var(--blue-soft)"],
       ["challenge", "⚑", "闯关模式", "十大关卡递进解锁，60/85/100 分线对应一至三星。", "var(--gold-soft)"],
       ["wrong", "☒", "错题本", "答错自动归集，支持按题库筛选、重练与“已掌握”标记。", "var(--red-soft)"],
@@ -355,23 +524,24 @@ Views.subjective = function () {
   });
 };
 
-/* ================= 关于（设计理念摘要） ================= */
+/* ================= 使用说明 ================= */
 Views.about = function () {
   $("#view").innerHTML = `
-  <h2 class="section-title">设计理念 <small>ABOUT & DOCS</small></h2>
+  <h2 class="section-title">使用说明 <small>OFFLINE STUDY</small></h2>
   <div class="card" style="font-size:14.5px;line-height:1.9">
-    <h3>「书斋纸感 × 思政朱红」</h3>
-    <p>本平台以“动态思维导图”为纲领（对应素材目录 README 的规划：章节结构数据、节点说明、节点关联与跳转规则），
-    向上生长出刷题、闯关、错题、成绩分析四大支柱。全部数据先由 Markdown 素材经
-    <code>tools/parse_sources.py</code> 统一转为 JSON，再由纯静态前端（无框架、无外部依赖）渲染，
-    保证在任何环境都能离线运行、随取随用。</p>
-    <p>完整的视觉规范、信息架构、JSON / localStorage 数据结构、闯关规则与后续开发路线，
-    均已记录在项目根目录的 <code>DOCUMENTATION.md</code>，供后续迭代开发直接上手。</p>
+    <h3>双击即学，离线可用</h3>
+    <p>双击 Web 文件夹中的 index.html 即可开始学习；也可以打开 Offline 文件夹中的单文件成品。
+    两种方式都无需联网。先用思维导图梳理完整知识树，搜索薄弱概念、阅读源笔记，再进入关联题目检验掌握情况。</p>
+    <h3>保存与迁移学习记录</h3>
+    <p>学习记录保存在当前浏览器中。换浏览器、移动文件或清理浏览器数据前，请到「成绩分析」导出 JSON 备份；
+    在新页面导入备份即可恢复。导入会覆盖当前学习记录，请先保存需要保留的进度。
+    若页面提示记录尚未保存，仍可继续学习，但关闭前务必导出备份。</p>
+    <p>资料包含课堂小测、考研真题精选及 2024 秋期末回忆卷。期末回忆资料可能与原卷存在差异，供公益复习参考，禁止售卖。</p>
     <div class="bank-meta" style="margin-top:14px">
-      <span class="tag red" style="font-size:12px">纯静态 · 零依赖</span>
-      <span class="tag gold" style="font-size:12px">localStorage 本地存档</span>
+      <span class="tag red" style="font-size:12px">双击打开 · 离线学习</span>
+      <span class="tag gold" style="font-size:12px">学习存档可导入 / 导出</span>
       <span class="tag green" style="font-size:12px">亮暗双主题</span>
-      <span class="tag blue" style="font-size:12px">125 客观题 + 7 主观题</span>
+      <span class="tag blue" style="font-size:12px">${DB.questions.length} 客观题 + ${DB.subjective.length} 主观题</span>
     </div>
   </div>`;
 };
@@ -380,18 +550,33 @@ Views.about = function () {
 function applyTheme(t) {
   document.documentElement.dataset.theme = t;
 }
-$("#themeToggle").onclick = () => {
-  Store.data.theme = Store.data.theme === "dark" ? "light" : "dark";
-  Store.save(); applyTheme(Store.data.theme);
-};
-
-(async function boot() {
+async function boot() {
   Store.load();
   applyTheme(Store.data.theme);
+  $("#themeToggle").onclick = () => {
+    Store.data.theme = Store.data.theme === "dark" ? "light" : "dark";
+    Store.save(); applyTheme(Store.data.theme);
+  };
   await DB.load();
   window.addEventListener("hashchange", route);
+  document.addEventListener("click", event => {
+    const link = event.target.closest?.("a[href^='#/']");
+    if (link && link.getAttribute("href") === location.hash && !event.defaultPrevented
+      && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+      event.preventDefault(); route();
+    }
+  });
   route();
-})().catch(e => {
-  $("#view").innerHTML = `<div class="empty">数据加载失败：${escapeHtml(e.message)}<br>
-    请确认通过 HTTP 服务访问（如 <code>python3 -m http.server</code>），而不是直接双击打开。</div>`;
-});
+}
+function startApp() {
+  boot().catch(e => {
+    $("#view").innerHTML = `<div class="empty" role="alert">数据加载失败：${escapeHtml(e.message)}<br>
+      请重新打开完整的离线文件；资料齐全时，直接双击即可使用。</div>`;
+  });
+}
+// 必须等后续业务脚本注册 Views 后再路由，内置资料无需 fetch 也能正确启动。
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", startApp, { once: true });
+} else {
+  startApp();
+}

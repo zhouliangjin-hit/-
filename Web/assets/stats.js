@@ -6,6 +6,37 @@
    ============================================================ */
 "use strict";
 
+const MAX_STUDY_BACKUP_BYTES = 10 * 1024 * 1024;
+
+function studyDataFeedback(message) {
+  const feedback = $("#dataFeedback");
+  if (feedback) feedback.textContent = message;
+}
+
+/** 新包装格式与旧版裸 Store.data 均只作为 JSON 数据读取。 */
+function parseLearningBackup(source) {
+  let raw;
+  try { raw = JSON.parse(source); }
+  catch { throw new Error("文件不是有效的 JSON，请选择导出的学习备份。"); }
+  assertSafeStudyObject(raw);
+  if (!isStudyObject(raw)) throw new Error("文件不是本应用的学习备份。");
+  let data = raw;
+  if (Object.hasOwn(raw, "format") || Object.hasOwn(raw, "data")) {
+    if (raw.format !== "mayuan.study.backup" || raw.version !== 1 || !isStudyObject(raw.data)) {
+      throw new Error("备份格式或版本不受支持，请选择本应用导出的文件。");
+    }
+    if (raw.exportedAt !== undefined && (typeof raw.exportedAt !== "string"
+      || !Number.isFinite(Date.parse(raw.exportedAt)))) {
+      throw new Error("备份的导出时间格式不正确。");
+    }
+    data = raw.data;
+  }
+  const knownIds = new Set([
+    ...DB.questions.map(q => q.id), ...DB.subjective.map(s => "S:" + s.id)
+  ]);
+  return Store.normalize(data, { requireComplete: true, knownIds });
+}
+
 Views.stats = function () {
   const d = Store.data;
   const att = d.attempts.filter(a => !String(a.qid).startsWith("S:"));
@@ -166,8 +197,12 @@ Views.stats = function () {
         </table>` : '<p class="muted">还没有成绩记录，去完成一组练习或一次闯关吧。</p>'}
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn small" id="exportData">导出学习数据(JSON)</button>
+          <button class="btn small" id="importData">导入学习备份</button>
+          <input id="importFile" type="file" accept=".json,application/json" hidden aria-label="选择学习备份 JSON 文件">
           <button class="btn small" id="resetData" style="color:var(--red)">清空全部学习记录</button>
         </div>
+        <p class="muted" style="font-size:12px;margin-top:8px">更换浏览器、移动页面或清理数据前请导出备份。导入会覆盖当前记录，支持本应用旧版 JSON 备份。</p>
+        <p id="dataFeedback" role="status" aria-live="polite" aria-atomic="true" style="font-size:12.5px;margin-top:8px"></p>
       </div>
     </div>`;
 
@@ -180,16 +215,66 @@ Views.stats = function () {
     });
   });
   $("#exportData").onclick = () => {
-    const blob = new Blob([JSON.stringify(Store.data, null, 2)], { type: "application/json" });
+    let url = null;
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `mayuan-study-backup-${dayKey()}.json`;
-    a.click();
-    toast("已导出备份文件");
+    try {
+      const backup = {
+        format: "mayuan.study.backup", version: 1,
+        exportedAt: new Date().toISOString(), data: Store.data
+      };
+      const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = `mayuan-study-backup-${dayKey()}.json`;
+      document.body.appendChild(a); a.click();
+      studyDataFeedback("已发起备份下载，请确认文件已保存。");
+      toast("已发起备份下载");
+    } catch {
+      studyDataFeedback("备份下载失败，请检查浏览器的下载设置后重试。");
+    } finally {
+      a.remove();
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  };
+  $("#importData").onclick = () => $("#importFile").click();
+  $("#importFile").onchange = async event => {
+    const input = event.target;
+    const file = input.files?.[0];
+    if (!file) return;
+    const importButton = $("#importData");
+    importButton.disabled = true;
+    studyDataFeedback("正在检查备份…");
+    try {
+      if (!file.size || file.size > MAX_STUDY_BACKUP_BYTES) {
+        throw new Error("请选择 10 MB 以内的非空 JSON 学习备份。");
+      }
+      const source = await file.text();
+      if (!input.isConnected) return;
+      const { data, ignoredIds } = parseLearningBackup(source);
+      const ignored = ignoredIds.length ? `\n${ignoredIds.length} 个当前题库未收录的题号将被忽略。` : "";
+      const summary = `备份含 ${data.attempts.length} 条作答记录、${data.sessions.length} 次练习成绩、${Object.keys(data.wrongBook).length} 道错题。`;
+      if (!confirm(`导入将覆盖当前学习记录及主题。\n${summary}${ignored}\n请先导出需要保留的当前进度。确定覆盖并导入？`)) {
+        studyDataFeedback("已取消导入。"); return;
+      }
+      const saved = Store.replace(data);
+      applyTheme(Store.data.theme);
+      route();
+      const message = saved ? "备份已导入并保存。" : "备份已导入，关闭页面前请重新导出备份。";
+      studyDataFeedback(message
+        + (ignoredIds.length ? ` 已忽略 ${ignoredIds.length} 个当前题库未收录的题号。` : ""));
+      toast(saved ? "学习记录已恢复" : "学习记录已恢复，请及时备份");
+    } catch (error) {
+      studyDataFeedback(`导入失败：${error.message}`);
+    } finally {
+      input.value = "";
+      importButton.disabled = false;
+    }
   };
   $("#resetData").onclick = () => {
     if (!confirm("确定清空全部学习记录？此操作不可撤销（可先导出备份）。")) return;
-    localStorage.removeItem(Store.KEY);
-    Store.load(); toast("已清空，重新开始"); route();
+    const saved = Store.reset();
+    route();
+    studyDataFeedback(saved ? "学习记录已清空。" : "本次页面的学习记录已清空，但浏览器中原有记录未能更新。");
+    toast(saved ? "已清空，重新开始" : "本次记录已清空，浏览器保存失败");
   };
 };

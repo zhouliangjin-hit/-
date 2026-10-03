@@ -1,6 +1,6 @@
 # 《马原研习社》设计文档
 
-> 版本：v1.0 ｜ 日期：2026-10-03
+> 版本：v1.3 ｜ 日期：2026-10-03
 > 适用范围：本文件完整记录网页的**风格（视觉规范）、思路（架构与数据流）、特性（功能规则）**，是后续迭代开发的唯一权威参考。修改代码前请先读本文件；改完代码请同步更新本文件。
 
 ---
@@ -26,7 +26,7 @@
 一个面向《马克思主义基本原理》课程复习的**纯静态学习网站**，中文名「马原研习社」。
 核心叙事：**以思维导图为纲，以题库练习为目；纲举目张，错题归仓，成绩有析。**
 
-### 1.2 素材清单（用户提供，位于 `uploads/`）
+### 1.2 素材清单（用户提供，位于工程 `mindmap/` 与 `questions/`）
 
 | 素材 | 内容 | 在本项目中的去向 |
 |---|---|---|
@@ -40,9 +40,9 @@
 
 ### 1.3 技术选型（有意为之的"克制"）
 
-- **零框架、零外部依赖**：原生 HTML/CSS/JS，不引 CDN、不打包——预览与离线双击都能跑（需经 HTTP 服务访问，因 `fetch` 读 JSON）。
-- **数据与代码分离**：所有题目/导图均为 JSON，由 `tools/parse_sources.py` 从 Markdown 生成；素材更新只需重跑脚本。
-- **纯本地存档**：学习数据存 `localStorage`，免登录、可导出备份（见 §4.8）。
+- **零框架、零外部依赖**：原生 HTML/CSS/JS，不引 CDN。`Web/index.html` 与工程根目录 `Offline/马原研习社.html` 都可以直接双击打开，也可静态托管。
+- **数据与代码分离**：题目/导图 JSON 由 `tools/parse_sources.py` 生成；`tools/build_offline.py` 生成普通数据脚本和自包含 HTML，维护者更新后统一重新生成。
+- **纯本地存档**：学习数据存 `localStorage`，免登录、可导出和导入备份；存储不可用时降级到本次会话内存并持续提示。
 
 ---
 
@@ -142,6 +142,7 @@ mayuan-study/
 ├── index.html            # SPA 外壳：顶栏导航 + #view 容器 + 页脚
 ├── assets/
 │   ├── style.css         # 全部样式 = 设计令牌 + 组件（见 §2）
+│   ├── mindmap.css       # 完整知识图谱、目录阅读与关系示意图
 │   ├── app.js            # 内核：Store(存档) / DB(数据) / 路由 / 工具 / 首页 / 刷题首页 / 主观题 / 关于
 │   ├── quiz.js           # 答题引擎（practice 即时判分 / exam 答题卡交卷）+ 成绩结算 + 回顾
 │   ├── mindmap.js        # 思维导图：SVG 树布局、缩放平移、折展、节点导读与刷题跳转
@@ -152,9 +153,12 @@ mayuan-study/
 │   ├── questions.json    # 125 道客观题（判断1/单选83/多选41）
 │   ├── subjective.json   # 7 道主观题（简答3/辨析2/论述1/材料论述1）
 │   ├── chapters.json     # 思维导图知识树（含节点笔记）
-│   └── banks.json        # 题库索引（分组/说明/题量）
+│   ├── banks.json        # 题库索引（分组/说明/题量）
+│   └── offline-data.js   # 普通脚本，赋值 window.MAYUAN_DATA，支持 file://
 ├── tools/
-│   └── parse_sources.py  # Markdown→JSON 流水线（README 约定的"最后统一转 JSON"）
+│   ├── parse_sources.py  # Markdown→JSON 流水线（README 约定的"最后统一转 JSON"）
+│   ├── mindmap_source.py # 标题、列表、正文与过程关系的完整导图解析
+│   └── build_offline.py  # 同步生成文件夹数据脚本和 Offline 单文件成品
 ├── DOCUMENTATION.md      # 本文件
 └── README.md             # 项目速览与启动方式
 ```
@@ -172,12 +176,14 @@ mayuan-study/
 | `#/subjective` | `Views.subjective` (app.js) | 主观题精讲 |
 | `#/about` | `Views.about` (app.js) | 设计理念摘要 |
 
-约定：各模块只向全局注册 `Views.<name>` 与少量纯函数（`startQuiz`、`pickQuestions`、`LEVELS`），不互相 import；`app.js` 最先加载创建内核，业务模块后加载。**新增页面 = 新建 js 文件注册 `Views.x` + index.html 加 script 标签 + 导航加链接。**
+约定：各模块只向全局注册 `Views.<name>` 与少量纯函数（`startQuiz`、`pickQuestions`、`LEVELS`），不互相 import；`offline-data.js` 先加载，`app.js` 创建内核，业务模块随后注册，`DOMContentLoaded` 后启动。**新增页面 = 新建 js 文件注册 `Views.x` + index.html 加 script 标签 + 导航加链接。**
 
 ### 3.3 数据流
 
 ```
-uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB（内存）
+mindmap/ + questions/ ──parse_sources.py──▶ data/*.json
+                        └─build_offline.py─▶ offline-data.js ──▶ DB（内存）
+                                          └─▶ Offline/马原研习社.html（全部资源内嵌）
                                                     │
 用户作答 ◀── quiz.js/challenge.js ──┤
         └──▶ Store.recordAnswer ──▶ localStorage ──▶ stats/wrongbook/mindmap 读取渲染
@@ -214,22 +220,14 @@ uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB
 - 「继续学习」三卡：下一关推荐、错题待攻克数、导图入口——数据实时来自存档。
 - 功能矩阵六卡导航。
 
-### 4.2 动态思维导图 ✅（原始 README 的核心诉求）
+### 4.2 完整知识图谱 ✅
 
-- **数据源**：`chapter-01.md` 的 `##/###/####` 标题层级 → `chapters.json` 树；标题间文本行作为节点 `notes`（导读，上限 40 条/节点）。
-- **形态**：横向 SVG 树，贝塞尔连线；默认收起第 3 层及以下保证首屏清爽。
-- **交互**：拖拽平移、滚轮/按钮缩放（0.35×–2.2×）、⌂ 复位、⇊/⇈ 全部展开/收起、节点 ± 折叠展开。
-- **节点导读侧栏**：面包屑路径 + 笔记列表。
-- **节点关联题目与跳转规则**（README 要求的"节点关联关系与跳转规则"）：规则表 `MAP_LINK_RULES` 按标题正则匹配，**子节点自动继承祖先链接**（去重）。当前映射：
-
-  | 导图分支 | 跳转题目 |
-  |---|---|
-  | 一、马克思主义的构成 | 考研·绪论真题 |
-  | 二、本体论（物质/意识/规律） | 课堂小测1、小测2、考研·世界的物质性、考研·规律与能动性 |
-  | 三、辩证法（联系/发展/环节/方法论） | 辩证法课堂练习、考研·三大规律、考研·联系和发展 |
-  | 根节点 | 期末真题全真小卷（总复习） |
-
-- **掌握度标记**：有链接的节点带绿点；依据存档显示该节点关联题的"正确率%"与完成进度条，实现"哪里不熟点哪里"。
+- **唯一内容来源**：工程 `mindmap/chapter-01.md`。标题、嵌套无序/有序列表和正文均解析入树；每个知识节点保留自己的原 Markdown 行与源行号，取消 40 条截断，不凭空补充教材内容。
+- **层级规范化**：物质下面同为 `###` 的三个编号小节规范为其子节点；辩证思维方法下面缩进不规范的四种方法归入对应任务；“不断增强思维能力”的重复源序号只在显示标签中移除，原文仍保留。
+- **浏览**：分支聚焦、全文搜索并展开定位路径、多行 SVG 标签、折叠展开、平移缩放与适应画布；目录阅读模式采用嵌套折叠结构，适合窄屏与长文本。
+- **节点详情**：路径、完整原文、下级知识点入口、源笔记行号及关联练习。
+- **关系表达**：知识树连线仅表示内容层级；原笔记两段 Mermaid 记录为关系示意数据，由原生 HTML/CSS/SVG 表达量变质变及否定之否定过程，不依赖联网渲染器。
+- **关联练习**：按所属知识分支与明确知识范围匹配练习；统计称为“关联练习正确率”，不把题库作答比例等同于具体知识点掌握程度。
 
 ### 4.3 闯关模式 ✅🆕（新增特性，重点记录）
 
@@ -277,7 +275,7 @@ uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB
 | 薄弱知识点 TOP5 | 按"考研=章节、其余=题库"聚合，**样本≥3 次作答才上榜**，按正确率升序取前 5；一键针对训练（混编≤20题） |
 | 成绩记录 | 最近 8 条 session：时间/内容/模式/成绩(含星级)/用时 |
 
-- **数据管理**：导出全部存档为 JSON 备份；两步确认后清空重开。
+- **数据管理**：导出全部存档为 JSON 备份、导入新旧格式备份（校验后确认覆盖）、确认后清空学习记录。导入过滤已不在当前题库中的题号。
 
 ### 4.6 顺序刷题 ✅
 
@@ -293,7 +291,7 @@ uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB
 ### 4.8 其他 ✅
 
 - 亮/暗主题切换（顶栏 ☾/☀，持久化）。
-- 空态/加载态/兜底错误提示（直接 file:// 打开时提示需 HTTP 服务）。
+- 空态/加载态/离线数据缺失提示；本地存储不可用时持续提示并保持本次练习可用。
 - 全部动效遵守 `prefers-reduced-motion`。
 
 ---
@@ -324,7 +322,7 @@ uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB
 
 ### 5.3 `chapters.json`（思维导图）
 
-`{id:"root.2.3", title, level:2, notes:[...], children:[...]}` —— level 即 markdown 标题级数（1–4）。
+`{id:"root.2.3", title, level:2, kind:"heading"|"concept"|"detail", notes:[原Markdown行], children:[...], source:{file,line,endLine}, diagrams?:[{type,title,source}]}`。`level` 表示规范化后的树深度，根为 0；`source` 可追溯原资料。根 `metadata` 记录节点数、有效文本行数和关系图数量。生成时不丢弃正文或以定长摘要替代原文。
 
 ### 5.4 `banks.json`
 
@@ -340,13 +338,15 @@ uploads/*.md ──parse_sources.py──▶ data/*.json ──fetch──▶ DB
 ## 6. 数据流水线：Markdown → JSON
 
 ```bash
-cd mayuan-study
-python3 tools/parse_sources.py     # 重新生成 data/*.json（含质量检查，异常题目会列到 stderr）
+python Web/tools/build_offline.py  # 在工程根目录，同步重建数据与两种离线版本
+python Web/tools/build_offline.py --skip-sources  # 仅打包当前 JSON 与网页代码
 ```
 
 - 四个解析器分别对应四类素材格式（各种"答案：B/正确答案：B/参考答案：B"、"解析：/解析**："等变体均已兼容）；解析不完整（缺答案/题干/选项）的题会在运行输出中点名。
-- **新增题库**：把新 md 放入 uploads（或改路径常量），在脚本中加一个 `parse_xxx()` 并在 `main()` 汇总、`banks` 里登记一行即可；网页端零改动接入（练习页、统计、薄弱点全自动出现新题库；如需入闯关则加一条 `LEVELS`）。
-- **新增导图章节**：把新笔记 md 按"标题层级=节点、正文=笔记"的约定追加进 `chapter-01.md`（或扩展脚本支持多文件），重跑脚本；跳转规则在 `MAP_LINK_RULES` 加一条正则。
+- **新增题库**：把新 md 放入 `questions` 对应目录，在 `SOURCE_FILES` 注册路径、添加解析器并在 `main()` 汇总、`banks` 登记题库；如需入闯关则加一条 `LEVELS`。
+- **新增导图内容**：按知识关系维护 `mindmap/chapter-01.md` 的标题和列表缩进，重新运行构建命令。当前支持该章资料；增加其他独立章节文件时需扩展解析入口。
+- **离线产物**：`offline-data.js` 将四份数据直接赋值给 `window.MAYUAN_DATA`；单文件将同一份页面的 CSS、脚本、数据和 PNG 内嵌，图片只编码一次，由首页复用。维护者需要 Python，最终使用者只需要浏览器。
+- **安全内嵌**：数据脚本将 `<`、Unicode 换行分隔符转义，避免源笔记中的文本提前闭合脚本标签。单文件生成后检查是否残留外部脚本、图片或样式引用。
 
 ---
 
@@ -358,7 +358,7 @@ python3 tools/parse_sources.py     # 重新生成 data/*.json（含质量检查�
 2. **教材 PDF 入库**：用 `pdftotext`/OCR 抽取 `马克思主义基本原理-2024秋…pdf` 各章大纲，补齐第二~七章导图与题目（同走 §6 流水线）。
 3. **成就与激励**：总星数 30/60/90 里程碑徽章、连续学习 7/30 天徽章；UI 入口已预留（首页 stat-strip）。
 4. **闯关玩法扩展**：限时关卡（`filter` 加 `timed:秒`）、Boss 关（错题池抽题）、每日一关。
-5. **导图节点级数据绑定**：将 `MAP_LINK_RULES` 正则表搬到 `chapters.json` 节点字段，实现素材级配置。
+5. **导图节点级数据绑定**：将当前按具体主题匹配的练习规则搬到 `chapters.json` 节点字段，实现素材级配置。
 6. **PWA 离线化**：加 `manifest.json` + Service Worker 缓存 data 与静态资源，手机端可"添加到主屏"。
 7. **打印/导出**：成绩报告 PDF（`window.print` + 打印样式），错题本导出 Markdown。
 8. **账号与云同步**：如需多端，建议 Supabase/LeanCloud 行级同步 `mayuan.study.v1` 全量 JSON（结构无需变），并保留本地优先策略。
@@ -369,15 +369,24 @@ python3 tools/parse_sources.py     # 重新生成 data/*.json（含质量检查�
 
 ## 8. 已知限制与注意事项
 
-- 数据仅保存在**当前浏览器** localStorage（同一浏览器同一域下共享）；清缓存会丢数据 → 请引导用户用「成绩分析 → 导出学习数据」定期备份。
-- 必须通过 HTTP 访问（`fetch` JSON 所致）；本地体验：`python3 -m http.server 8000`。
-- 导图 `notes` 为纯文本导读（轻 markdown 渲染：粗体/列表/引用/换行），不支持图片与表格。
+- 数据保存在**当前浏览器** localStorage；`file://` 在不同浏览器、文件路径或隐私设置下行为可能不同，文件夹版与单文件版也不承诺共享存档。清理缓存、移动文件或换版本前请导出，之后导入；保存失败时使用内存并提示。
+- HTTP 旧版导出的裸存档可导入；新版导出格式为 `{format:"mayuan.study.backup",version:1,exportedAt:ISO日期,data:Store.data}`。导入限制 10 MB、验证字段和数值、拒绝危险对象键，覆盖前确认。
+- `Store.save()` / `Store.replace(data)` / `Store.reset()` 返回是否持久保存成功。reset 清空学习数据并保留主题；任何存储失败不得阻断作答。
+- 导图原文使用轻 Markdown 渲染；当前两段 Mermaid 有原生关系图实现，暂不支持任意 Mermaid 语法、图片或表格自动转换。
 - 期末卷为**回忆版**（数据源声明）：个别题干为回忆替代，解析非官方，页面页脚与关于页均已注明"公益复习、禁止售卖"。
 - 浏览器兼容：使用了 `color-mix()`、SVG、`fetch`、optional chaining——目标为近两年主流浏览器。
 
 ---
 
 ## 9. 变更日志
+
+### v1.3（2026-10-03）双击离线版与完整知识图谱
+
+- `Web/index.html` 直接双击使用；新增 `Offline/马原研习社.html` 自包含成品及统一构建工具，取消最终用户的 HTTP/Python 依赖。
+- 导图解析完整标题、嵌套列表和正文，保留原文与源行号；规范物质、辩证思维方法等不严谨源层级，取消笔记截断。
+- 新增分支聚焦、全文搜索定位、目录阅读、多行节点及原生过程关系示意，练习统计不再标为知识掌握度。
+- 显式等待全部脚本加载后启动；本地保存失败可继续练习，增加学习备份导入与旧存档迁移。
+- 素材路径改为相对当前工程，在 Windows 与其他平台均可由维护者重新生成。
 
 ### v1.2（2026-10-03）UI 美化升级
 
